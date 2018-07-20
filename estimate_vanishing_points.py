@@ -123,7 +123,8 @@ def normalize_homogenous_line(line):
 
 def angle_between_homogenous_lines(line1, line2):
     angle_in_rads = np.arccos(np.clip((line1[0] * line2[0]) + (line1[1] * line2[1]), -1.0, 1.0))
-    return np.rad2deg(angle_in_rads)
+    angle = np.rad2deg(angle_in_rads)
+    return angle if angle <= 90.0 else 180 - angle
 
 
 def modified_calc_vote(theta, factor=5.0):
@@ -168,7 +169,7 @@ def ransac_vanishing_point(edgelets, num_ransac_iter=250, threshold_inlier=5):
     best_vp, best_votes, best_sum = None, None, 0.0
     top_20_per_idx, top_50_per_idx = num_pts // 5, num_pts // 2
 
-    for ransac_iter in range(num_ransac_iter):
+    for ransac_iter in range(1, num_ransac_iter + 1):
         idx1 = np.random.choice(top_20_per_idx)
         idx2 = np.random.choice(top_50_per_idx)
 
@@ -213,7 +214,7 @@ def get_vanishing_points_and_inliers(image_path, reestimate=False):
 def visualize_inliers(image_path, inliers):
     image = io.imread(image_path, as_grey=True)
     edges = feature.canny(image, sigma=2)
-    lines = probabilistic_hough_line(edges, line_length=3, line_gap=2)
+    lines = transform.probabilistic_hough_line(edges, line_length=3, line_gap=2)
 
     fig, axes = plt.subplots(1, 3, figsize=(15, 5), sharex=True, sharey=True)
     ax = axes.ravel()

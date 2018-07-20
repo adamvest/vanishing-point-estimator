@@ -3,5 +3,5 @@
 Run with:
 
 ```
-python vanishing_point_estimator.py <path-to-image-file>
+python estimate_vanishing_points.py <path-to-image-file>
 ```
