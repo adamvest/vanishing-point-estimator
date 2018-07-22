@@ -9,8 +9,12 @@ class VanishingPointEstimatorOptions():
     def __init__(self):
         self.parser = argparse.ArgumentParser()
 
-        self.parser.add_argument('--data_path', default="../dataset1280", help="path to dataset")
-        self.parser.add_argument('--mode', default="train", help="train, test, or validation")
+        self.parser.add_argument('--image_path', required=True, help="path to image to detect vps in")
+        self.parser.add_argument('--num_vps', type=int, default=2, help="number of vanishing points to compute")
+        self.parser.add_argument('--num_ransac_iter', type=int, default=500, help="number of iterations to run ransac")
+        self.parser.add_argument('--inlier_angle', type=float, default=5.0, help="max angle to consider an edge an inlier")
+        self.parser.add_argument('--use_length', type=int, default=1, help="whether to use length when determining edge strength")
+        self.parser.add_argument('--vote_factor', type=float, default=5.0, help="factor to multiply angle by before computing vote")
 
     def parse(self):
         return self.parser.parse_args()
@@ -68,7 +72,7 @@ def compute_length(start, end):
     return np.sqrt(np.square(start[0] - end[0]) + np.square(start[1] - end[1]))
 
 
-def calculate_line_strength(line_points, img_grads, use_length=False):
+def calculate_line_strength(line_points, img_grads, use_length):
     grad_sum, length_factor = 0.0, 1.0
 
     if use_length:
@@ -92,7 +96,7 @@ def sort_by_strength(locations, directions, strengths):
     return np.array(sorted_locs), np.array(sorted_dirs), np.array(sorted_strs)
 
 
-def compute_edgelets(gray_img):
+def compute_edgelets(gray_img, use_length):
     scharr_h = filters.scharr_h(gray_img)
     scharr_v = filters.scharr_v(gray_img)
     img_grad_mags = np.sqrt(np.square(scharr_h) + np.square(scharr_v))
@@ -103,7 +107,7 @@ def compute_edgelets(gray_img):
     for p0, p1 in lines:
         line_points = get_bresenham_line(p0, p1)
         p0, p1 = np.hstack((np.array(p0), 1)), np.hstack((np.array(p1), 1))
-        strengths.append(calculate_line_strength(line_points, img_grad_mags, True))
+        strengths.append(calculate_line_strength(line_points, img_grad_mags, use_length))
         directions.append(np.cross(p0, p1))
         locations.append((p0, p1))
 
@@ -127,11 +131,11 @@ def angle_between_homogenous_lines(line1, line2):
     return angle if angle <= 90.0 else 180 - angle
 
 
-def modified_calc_vote(theta, factor=5.0):
+def modified_calc_vote(theta, factor):
     return np.square(np.cos(np.deg2rad(theta * factor)))
 
 
-def compute_votes(edgelets, vanishing_point, threshold_inlier=5.0, use_length=False):
+def compute_votes(edgelets, vanishing_point, args):
     locations, directions, strengths = edgelets
     votes = []
 
@@ -146,11 +150,11 @@ def compute_votes(edgelets, vanishing_point, threshold_inlier=5.0, use_length=Fa
         theta = min(theta1, theta2)
         length_factor = 1.0
 
-        if use_length:
+        if args.use_length:
             length_factor = compute_length(locations[i][0][:2], locations[i][1][:2])
 
-        if theta <= threshold_inlier:
-            votes.append(length_factor * modified_calc_vote(theta))
+        if theta <= args.inlier_angle:
+            votes.append(length_factor * modified_calc_vote(theta, args.vote_factor))
         else:
             votes.append(0.0)
 
@@ -162,14 +166,14 @@ def is_coinciding(line1, line2):
     return np.array_equal(intersect, np.zeros(3))
 
 
-def ransac_vanishing_point(edgelets, num_ransac_iter=250, threshold_inlier=5):
+def ransac_vanishing_point(edgelets, args):
     print("\nEstimating New Vanishing Point\n")
     _, directions, _ = edgelets
     num_pts = directions.shape[0]
     best_vp, best_votes, best_sum = None, None, 0.0
     top_20_per_idx, top_50_per_idx = num_pts // 5, num_pts // 2
 
-    for ransac_iter in range(1, num_ransac_iter + 1):
+    for ransac_iter in range(1, args.num_ransac_iter + 1):
         idx1 = np.random.choice(top_20_per_idx)
         idx2 = np.random.choice(top_50_per_idx)
 
@@ -177,7 +181,7 @@ def ransac_vanishing_point(edgelets, num_ransac_iter=250, threshold_inlier=5):
             continue
 
         current_vp = np.cross(directions[idx1], directions[idx2])
-        current_votes = compute_votes(edgelets, current_vp, use_length=True)
+        current_votes = compute_votes(edgelets, current_vp, args)
         current_sum = current_votes.sum()
 
         if current_sum > best_sum:
@@ -199,16 +203,18 @@ def remove_inliers(edgelets, votes):
     return remaining_edgelets, inlier_edgelets
 
 
-def get_vanishing_points_and_inliers(image_path, reestimate=False):
-    image = io.imread(image_path, as_grey=True)
-    edgelets = compute_edgelets(image)
-    vp1, votes = ransac_vanishing_point(edgelets)
-    edgelets, inliers1 = remove_inliers(edgelets, votes)
-    vp2, votes = ransac_vanishing_point(edgelets)
-    edgelets, inliers2 = remove_inliers(edgelets, votes)
-    vp3, votes = ransac_vanishing_point(edgelets)
-    _, inliers3 = remove_inliers(edgelets, votes)
-    return (vp1, vp2, vp3), (inliers1, inliers2, inliers3)
+def get_vanishing_points_and_inliers(args):
+    image = io.imread(args.image_path, as_grey=True)
+    vps, inlier_sets = [], []
+    edgelets = compute_edgelets(image, args.use_length)
+
+    for i in range(args.num_vps):
+        vp, votes = ransac_vanishing_point(edgelets, args)
+        edgelets, inliers = remove_inliers(edgelets, votes)
+        vps.append(vp)
+        inlier_sets.append(inliers)
+
+    return vps, inlier_sets
 
 
 def visualize_inliers(image_path, inliers):
@@ -256,8 +262,8 @@ def visualize_inliers(image_path, inliers):
 
 
 if __name__ == '__main__':
-    image_path = sys.argv[-1]
-    vps, inliers = get_vanishing_points_and_inliers(image_path)
+    args = VanishingPointEstimatorOptions().parse()
+    vps, inliers = get_vanishing_points_and_inliers(args)
 
     for i in range(len(vps)):
         print("\nHomogenous Vanishing Point:", vps[i])
@@ -271,4 +277,4 @@ if __name__ == '__main__':
 
         print("Number of Inlier Edges:", len(inliers[i][0]))
 
-    visualize_inliers(image_path, inliers)
+    visualize_inliers(args.image_path, inliers)
